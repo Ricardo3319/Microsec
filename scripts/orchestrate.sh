@@ -320,11 +320,7 @@ run_experiment() {
     
     # 只在实验结束后收集日志 (不在实验进行中收集，以避免性能影响)
     log "Collecting logs from all remote nodes (after experiment)..."
-    if [ -f "$SCRIPT_DIR/collect_logs_simple.sh" ]; then
-        bash "$SCRIPT_DIR/collect_logs_simple.sh" "$exp_name"
-    elif [ -f "$SCRIPT_DIR/collect_logs.sh" ]; then
-        bash "$SCRIPT_DIR/collect_logs.sh" "$exp_name"
-    fi
+    bash "$SCRIPT_DIR/collect_logs_simple.sh" "$exp_name"
     
     log "Experiment $exp_name completed!"
 }

@@ -1,0 +1,57 @@
+# Build directories
+build/
+cmake_build/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Experiment outputs
+results/
+logs/
+*.log
+*.out
+
+# Core dumps
+core.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Object files
+*.o
+*.obj
+
+# Executable
+client
+load_balancer
+worker
+histogram_merge
+
+# Data files
+*.csv
+*.hdr

@@ -5,27 +5,37 @@
  * - I/O 执行线程（主线程）：
  *   1. 运行 eRPC 事件循环 (同步处理网络 I/O)
  *   2. 在 request_handler 回调中接收请求并入队到 task_queue_
- *   3. 发送响应给客户端
+ *   3. 从 completion_queue_ 取完成任务，调用 eRPC enqueue_response()
  * 
  * - 计算执行线程（工作线程，数量 = num_rpc_threads）：
  *   1. 从 task_queue_ 取任务 (线程安全, 无竞争)
  *   2. 执行计算模拟和延迟注入
  *   3. 更新指标 (延迟、违约)
+ *   4. push 完成的任务到 completion_queue_（不调用任何 eRPC 方法）
  * 
  * 优点：
- * - 消除 eRPC 竞争：只有一个线程在 eRPC 事件循环中运行
+ * - 消除 eRPC 竞争：只有一个线程（主线程）调用 eRPC 方法
  * - 消除 HoL 阻塞：计算不阻塞 I/O，即使计算线程阻塞在 sleep 中
- * - 可扩展性：计算线程数可独立调整
+ * - 线程安全：完成队列用于线程间通信
  */
 
 #include "worker_context.h"
 #include <chrono>
 #include <iostream>
+#include <thread>
+#include <sstream>
 
 namespace malcolm {
 
 // 全局上下文指针 (用于静态回调)
 static WorkerContext* g_worker_ctx = nullptr;
+
+// 辅助函数：获取简短的 Thread ID
+static size_t get_tid() {
+    std::stringstream ss;
+    ss << std::this_thread::get_id();
+    return std::hash<std::string>{}(ss.str()) % 10000; // 简化 ID
+}
 
 WorkerContext::WorkerContext(const WorkerConfig& config)
     : config_(config),
@@ -92,6 +102,10 @@ void WorkerContext::start() {
         // 运行一次 eRPC 事件循环 - 处理入站请求
         // 这会调用 request_handler 回调，将请求入队到 task_queue_
         rpc_->run_event_loop_once();
+        
+        // 处理完成队列（由计算线程填充）
+        // 这部分也必须在 I/O 线程执行，因为会调用 eRPC 方法
+        process_completions();
     }
     
     printf("[Worker %u] RPC event loop stopped\n", config_.worker_id);
@@ -152,9 +166,10 @@ void WorkerContext::request_handler(erpc::ReqHandle* req_handle, void* context) 
     const erpc::MsgBuffer* req_msgbuf = req_handle->get_req_msgbuf();
     auto* request = reinterpret_cast<const RpcWorkerRequest*>(req_msgbuf->buf_);
     
-    // [DEBUG LOG] 只印前5个避免刷屏
+    // [DEBUG LOG with TID] 只印前5个避免刷屏
     if (request->request_id < 5) {
-        printf("[Worker %u] Enqueueing Req %lu\n", worker->config_.worker_id, request->request_id);
+        printf("[Worker %u][TID:%zu] Enqueueing Req %lu (Main/I/O thread)\n", 
+               worker->config_.worker_id, get_tid(), request->request_id);
     }
     
     // 构造任务
@@ -195,13 +210,15 @@ void WorkerContext::export_metrics() {
 }
 
 void WorkerContext::compute_thread_main(size_t thread_id) {
-    printf("[Worker %u] Compute thread %zu started\n", config_.worker_id, thread_id);
+    printf("[Worker %u][TID:%zu] Compute thread %zu started\n", 
+           config_.worker_id, get_tid(), thread_id);
     
     while (running_.load(std::memory_order_relaxed)) {
         process_tasks();
     }
     
-    printf("[Worker %u] Compute thread %zu stopped\n", config_.worker_id, thread_id);
+    printf("[Worker %u][TID:%zu] Compute thread %zu stopped\n", 
+           config_.worker_id, get_tid(), thread_id);
 }
 
 void WorkerContext::process_tasks() {
@@ -214,9 +231,10 @@ void WorkerContext::process_tasks() {
         return;
     }
     
-    // [DEBUG LOG] 只印前5个避免刷屏
+    // [DEBUG LOG with TID] 只印前5个避免刷屏
     if (task.request_id < 5) {
-        printf("[Worker %u] Processing Req %lu\n", config_.worker_id, task.request_id);
+        printf("[Worker %u][TID:%zu] Processing Req %lu (Compute thread)\n", 
+               config_.worker_id, get_tid(), task.request_id);
     }
     
     Timestamp start = now_ns();
@@ -248,39 +266,62 @@ void WorkerContext::process_tasks() {
         metrics_.record_deadline_miss();
     }
     
-    // [DEBUG LOG] 只印前5个避免刷屏
+    // [DEBUG LOG with TID] 只印前5个避免刷屏
     if (task.request_id < 5) {
-        printf("[Worker %u] Replying Req %lu\n", config_.worker_id, task.request_id);
+        printf("[Worker %u][TID:%zu] Computed Req %lu (ready for I/O thread)\n", 
+               config_.worker_id, get_tid(), task.request_id);
     }
     
-    // 构造并发送响应 (线程安全：rpc_ 是指针，响应逻辑不会被修改)
-    if (task.request_handle && rpc_) {
-        auto* req_handle = static_cast<erpc::ReqHandle*>(task.request_handle);
-        
-        // 分配响应缓冲区
-        erpc::MsgBuffer& resp_msgbuf = req_handle->pre_resp_msgbuf_;
-        rpc_->resize_msg_buffer(&resp_msgbuf, sizeof(RpcWorkerResponse));
-        
-        // 填充响应
-        auto* response = reinterpret_cast<RpcWorkerResponse*>(resp_msgbuf.buf_);
-        response->request_id = task.request_id;
-        response->worker_recv_time = task.arrival_time;
-        response->worker_done_time = done_time;
-        response->queue_time_ns = queue_time;
-        response->service_time_us = static_cast<uint32_t>(ns_to_us(actual_time));
-        response->queue_length = static_cast<uint16_t>(queue_length());
-        response->worker_id = config_.worker_id;
-        response->success = 1;
-        
-        // 发送响应 (通过 eRPC 的线程安全接口 enqueue_response)
-        rpc_->enqueue_response(req_handle, &resp_msgbuf);
-    }
+    // 保存完成信息到任务，然后 push 到完成队列（I/O 线程会处理）
+    // 不在这里调用任何 eRPC 方法！eRPC 只能在 I/O 线程中调用
+    task.worker_done_time = done_time;
+    task.actual_service_time_us = actual_time;
+    task.queue_time_ns = queue_time;
+    
+    // Push 到完成队列，I/O 线程会取出并调用 eRPC enqueue_response()
+    completion_queue_.push(std::move(task));
     
     active_requests_.fetch_sub(1, std::memory_order_relaxed);
     completed_requests_.fetch_add(1, std::memory_order_relaxed);
     
-    (void)actual_time;
     (void)start;
+}
+
+void WorkerContext::process_completions() {
+    // 这个方法在 I/O 线程中执行，安全地调用 eRPC 方法
+    Task task;
+    int batch_size = 32;  // 每次最多处理 32 个完成的任务
+    
+    while (batch_size-- > 0 && completion_queue_.try_pop(task)) {
+        // [DEBUG LOG with TID] 只印前5个避免刷屏
+        if (task.request_id < 5) {
+            printf("[Worker %u][TID:%zu] Replying Req %lu (Main/I/O thread)\n", 
+                   config_.worker_id, get_tid(), task.request_id);
+        }
+        
+        // 现在安全地调用 eRPC 方法（仅在 I/O 线程）
+        if (task.request_handle && rpc_) {
+            auto* req_handle = static_cast<erpc::ReqHandle*>(task.request_handle);
+            
+            // 分配响应缓冲区
+            erpc::MsgBuffer& resp_msgbuf = req_handle->pre_resp_msgbuf_;
+            rpc_->resize_msg_buffer(&resp_msgbuf, sizeof(RpcWorkerResponse));
+            
+            // 填充响应
+            auto* response = reinterpret_cast<RpcWorkerResponse*>(resp_msgbuf.buf_);
+            response->request_id = task.request_id;
+            response->worker_recv_time = task.arrival_time;
+            response->worker_done_time = task.worker_done_time;
+            response->queue_time_ns = task.queue_time_ns;
+            response->service_time_us = static_cast<uint32_t>(ns_to_us(task.actual_service_time_us));
+            response->queue_length = static_cast<uint16_t>(queue_length());
+            response->worker_id = config_.worker_id;
+            response->success = 1;
+            
+            // 发送响应
+            rpc_->enqueue_response(req_handle, &resp_msgbuf);
+        }
+    }
 }
 
 }  // namespace malcolm

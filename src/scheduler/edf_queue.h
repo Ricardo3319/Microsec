@@ -32,6 +32,11 @@ struct Task {
     void* request_msg;           // eRPC 请求消息指针
     void* request_handle;        // eRPC 请求句柄
     
+    // ===== 完成信息 (由计算线程填充，供 I/O 线程使用) =====
+    Timestamp worker_done_time = 0;      // Worker 完成处理的时间
+    Timestamp actual_service_time_us = 0; // 实际服务时间 (μs)
+    Timestamp queue_time_ns = 0;         // 排队时间 (ns)
+    
     // EDF 比较: 截止时间越早优先级越高
     bool operator>(const Task& other) const {
         return deadline > other.deadline;

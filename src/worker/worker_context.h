@@ -184,8 +184,11 @@ private:
     /// 计算线程主循环 (处理任务队列中的任务)
     void compute_thread_main(size_t thread_id);
     
-    /// 从任务队列取任务并处理
+    /// 从任务队列取任务并处理 (计算线程执行)
     void process_tasks();
+    
+    /// 处理完成队列，发送响应 (I/O 线程执行，唯一调用 eRPC 的地方)
+    void process_completions();
     
 private:
     WorkerConfig config_;
@@ -196,6 +199,10 @@ private:
     
     // 线程安全的任务队列 (I/O 线程 → 计算线程)
     ThreadSafeTaskQueue task_queue_;
+    
+    // 线程安全的完成队列 (计算线程 → I/O 线程)
+    // 计算线程 push 完成的任务，I/O 线程 pop 并调用 eRPC enqueue_response()
+    ThreadSafeTaskQueue completion_queue_;
     
     // 任务调度队列 (已弃用，但保留接口兼容)
     std::unique_ptr<EDFQueue> edf_queue_;

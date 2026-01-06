@@ -282,6 +282,13 @@ run_experiment() {
     log "  Duration:   $((WARMUP_SEC + DURATION_SEC))s"
     log "=========================================="
     
+    # 清空所有节点的旧日志 (只需执行一次，不影响性能)
+    log "Cleaning up old logs on all nodes..."
+    for node in "${!NODES[@]}"; do
+        ssh_run "$node" "rm -f $LOG_DIR/*.log 2>/dev/null || true" &
+    done
+    wait
+    
     # 准备
     stop_all
     setup_heterogeneity
@@ -307,9 +314,17 @@ run_experiment() {
     done
     echo ""
     
-    # 停止并收集
+    # 停止、收集结果
     stop_all
     collect_results "$exp_name"
+    
+    # 只在实验结束后收集日志 (不在实验进行中收集，以避免性能影响)
+    log "Collecting logs from all remote nodes (after experiment)..."
+    if [ -f "$SCRIPT_DIR/collect_logs_simple.sh" ]; then
+        bash "$SCRIPT_DIR/collect_logs_simple.sh" "$exp_name"
+    elif [ -f "$SCRIPT_DIR/collect_logs.sh" ]; then
+        bash "$SCRIPT_DIR/collect_logs.sh" "$exp_name"
+    fi
     
     log "Experiment $exp_name completed!"
 }

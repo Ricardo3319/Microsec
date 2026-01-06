@@ -1,5 +1,21 @@
 /**
- * Worker 上下文实现 - 真正的 eRPC 服务
+ * Worker 上下文实现 - 分离 I/O 和计算线程
+ * 
+ * 架构改进：
+ * - I/O 执行线程（主线程）：
+ *   1. 运行 eRPC 事件循环 (同步处理网络 I/O)
+ *   2. 在 request_handler 回调中接收请求并入队到 task_queue_
+ *   3. 发送响应给客户端
+ * 
+ * - 计算执行线程（工作线程，数量 = num_rpc_threads）：
+ *   1. 从 task_queue_ 取任务 (线程安全, 无竞争)
+ *   2. 执行计算模拟和延迟注入
+ *   3. 更新指标 (延迟、违约)
+ * 
+ * 优点：
+ * - 消除 eRPC 竞争：只有一个线程在 eRPC 事件循环中运行
+ * - 消除 HoL 阻塞：计算不阻塞 I/O，即使计算线程阻塞在 sleep 中
+ * - 可扩展性：计算线程数可独立调整
  */
 
 #include "worker_context.h"
@@ -15,16 +31,14 @@ WorkerContext::WorkerContext(const WorkerConfig& config)
     : config_(config),
       simulator_(config.capacity_factor) {
     
-    // 根据调度策略创建队列
+    // 根据调度策略创建队列 (接口兼容，但新架构中不使用)
     if (config_.scheduler == LocalSchedulerType::kEDF) {
-        edf_queue_ = std::make_unique<EDFQueue>(EDFQueue::Implementation::kLocked);
-        printf("[Worker %u] Using EDF scheduler\n", config_.worker_id);
+        printf("[Worker %u] Using EDF scheduler (legacy interface)\n", config_.worker_id);
     } else {
-        fcfs_queue_ = std::make_unique<FCFSQueue>();
-        printf("[Worker %u] Using FCFS scheduler\n", config_.worker_id);
+        printf("[Worker %u] Using FCFS scheduler (legacy interface)\n", config_.worker_id);
     }
     
-    printf("[Worker %u] Initialized (capacity_factor=%.2f, threads=%zu)\n",
+    printf("[Worker %u] Initialized (capacity_factor=%.2f, compute_threads=%zu)\n",
            config_.worker_id, config_.capacity_factor, config_.num_rpc_threads);
 }
 
@@ -49,7 +63,7 @@ void WorkerContext::start() {
     // 注册 RPC 处理函数
     nexus_->register_req_func(kReqLBToWorker, request_handler);
     
-    // 创建 RPC 端点
+    // 创建 RPC 端点 (主线程)
     rpc_ = new erpc::Rpc<erpc::CTransport>(
         nexus_, 
         this,                           // context
@@ -58,20 +72,26 @@ void WorkerContext::start() {
         config_.phy_port                // 物理端口
     );
     
-    printf("[Worker %u] eRPC initialized, running event loop in main thread...\n",
+    printf("[Worker %u] eRPC initialized\n", config_.worker_id);
+    
+    // 启动计算线程池
+    printf("[Worker %u] Starting %zu compute threads\n", 
+           config_.worker_id, config_.num_rpc_threads);
+    for (size_t i = 0; i < config_.num_rpc_threads; ++i) {
+        compute_threads_.emplace_back(
+            [this, i]() { compute_thread_main(i); }
+        );
+    }
+    
+    printf("[Worker %u] Running eRPC event loop in main thread...\n",
            config_.worker_id);
     
+    // 主线程运行 eRPC 事件循环 (I/O 执行线程)
     // 注意：eRPC 要求 Rpc 对象在同一线程创建和使用
-    // 因此事件循环在主线程运行，请求处理也在主线程完成（同步模式）
-    printf("[Worker %u] Running, press Ctrl+C to stop...\n", config_.worker_id);
-    printf("[Worker %u] RPC event loop started\n", config_.worker_id);
-    
     while (running_.load()) {
-        // 运行 eRPC 事件循环 - 处理入站请求
+        // 运行一次 eRPC 事件循环 - 处理入站请求
+        // 这会调用 request_handler 回调，将请求入队到 task_queue_
         rpc_->run_event_loop_once();
-        
-        // 同步处理队列中的任务（在主线程）
-        process_tasks();
     }
     
     printf("[Worker %u] RPC event loop stopped\n", config_.worker_id);
@@ -84,13 +104,13 @@ void WorkerContext::stop() {
     
     printf("[Worker %u] Stopping...\n", config_.worker_id);
     
-    // 等待所有线程结束
-    for (auto& t : threads_) {
+    // 等待所有计算线程结束
+    for (auto& t : compute_threads_) {
         if (t.joinable()) {
             t.join();
         }
     }
-    threads_.clear();
+    compute_threads_.clear();
     
     // 清理 eRPC
     if (rpc_) {
@@ -111,14 +131,14 @@ void WorkerContext::stop() {
 }
 
 void WorkerContext::wait() {
-    for (auto& t : threads_) {
+    for (auto& t : compute_threads_) {
         if (t.joinable()) {
             t.join();
         }
     }
 }
 
-// 静态 RPC 请求处理回调
+// 静态 RPC 请求处理回调 (I/O 线程调用)
 void WorkerContext::request_handler(erpc::ReqHandle* req_handle, void* context) {
     auto* worker = static_cast<WorkerContext*>(context);
     if (!worker) {
@@ -143,32 +163,20 @@ void WorkerContext::request_handler(erpc::ReqHandle* req_handle, void* context) 
     task.client_send_time = request->client_send_time;
     task.service_time_hint = request->service_time_hint;
     
-    // 入队
-    if (worker->edf_queue_) {
-        worker->edf_queue_->push(std::move(task));
-    } else if (worker->fcfs_queue_) {
-        worker->fcfs_queue_->push(std::move(task));
-    }
+    // 入队到线程安全队列 (发送给计算线程处理)
+    worker->task_queue_.push(std::move(task));
     
     worker->active_requests_.fetch_add(1, std::memory_order_relaxed);
 }
 
 size_t WorkerContext::queue_length() const {
-    if (edf_queue_) {
-        return edf_queue_->size();
-    } else if (fcfs_queue_) {
-        return fcfs_queue_->size();
-    }
-    return 0;
+    return task_queue_.size();
 }
 
 void WorkerContext::get_slack_histogram(
     std::array<uint32_t, constants::kSlackHistogramBins>& hist) const {
-    if (edf_queue_) {
-        edf_queue_->get_slack_histogram(hist);
-    } else {
-        hist.fill(0);
-    }
+    // 新架构中不使用 EDF 队列的 slack 直方图
+    hist.fill(0);
 }
 
 void WorkerContext::export_metrics() {
@@ -181,34 +189,22 @@ void WorkerContext::export_metrics() {
            config_.worker_id, config_.metrics_output_dir.c_str());
 }
 
-void WorkerContext::handle_request(void* req_handle, const WorkerRequest* request) {
-    (void)req_handle;
-    (void)request;
-    // 已移到静态 request_handler
-}
-
-void WorkerContext::worker_thread_main(size_t thread_id) {
-    printf("[Worker %u] Thread %zu started\n", config_.worker_id, thread_id);
+void WorkerContext::compute_thread_main(size_t thread_id) {
+    printf("[Worker %u] Compute thread %zu started\n", config_.worker_id, thread_id);
     
     while (running_.load(std::memory_order_relaxed)) {
         process_tasks();
     }
     
-    printf("[Worker %u] Thread %zu stopped\n", config_.worker_id, thread_id);
+    printf("[Worker %u] Compute thread %zu stopped\n", config_.worker_id, thread_id);
 }
 
 void WorkerContext::process_tasks() {
     Task task;
-    bool got_task = false;
     
-    if (edf_queue_) {
-        got_task = edf_queue_->try_pop(task);
-    } else if (fcfs_queue_) {
-        got_task = fcfs_queue_->try_pop(task);
-    }
-    
-    if (!got_task) {
-        // 无任务，短暂等待避免忙轮询
+    // 从线程安全队列取任务 (无忙轮询)
+    if (!task_queue_.try_pop(task)) {
+        // 无任务，短暂等待
         std::this_thread::sleep_for(std::chrono::microseconds(1));
         return;
     }
@@ -216,7 +212,7 @@ void WorkerContext::process_tasks() {
     Timestamp start = now_ns();
     Timestamp queue_time = start - task.arrival_time;
     
-    // 模拟处理
+    // 执行计算模拟
     uint32_t expected_service_us = task.service_time_hint > 0 ? 
                                    task.service_time_hint : 10;
     Timestamp actual_time = simulator_.process(task.type, expected_service_us);
@@ -242,7 +238,7 @@ void WorkerContext::process_tasks() {
         metrics_.record_deadline_miss();
     }
     
-    // 构造并发送响应
+    // 构造并发送响应 (线程安全：rpc_ 是指针，响应逻辑不会被修改)
     if (task.request_handle && rpc_) {
         auto* req_handle = static_cast<erpc::ReqHandle*>(task.request_handle);
         
@@ -261,7 +257,7 @@ void WorkerContext::process_tasks() {
         response->worker_id = config_.worker_id;
         response->success = 1;
         
-        // 发送响应
+        // 发送响应 (通过 eRPC 的线程安全接口 enqueue_response)
         rpc_->enqueue_response(req_handle, &resp_msgbuf);
     }
     

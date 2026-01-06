@@ -12,6 +12,9 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 #include "../common/types.h"
 #include "../common/metrics.h"
@@ -107,7 +110,48 @@ private:
 };
 
 /**
+ * 线程安全的任务队列 (用于 I/O 线程 → 计算线程)
+ */
+class ThreadSafeTaskQueue {
+public:
+    void push(Task task) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(std::move(task));
+        }
+        cv_.notify_one();
+    }
+    
+    bool try_pop(Task& task) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) return false;
+        task = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+    
+    void wait_for_task() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return !queue_.empty(); });
+    }
+    
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<Task> queue_;
+};
+
+/**
  * Worker 运行时上下文
+ * 
+ * 架构：
+ * - I/O 执行线程：处理 eRPC 事件循环、接收请求、发送响应 (主线程)
+ * - 计算执行线程：从任务队列取任务、执行计算、更新指标 (工作线程)
  */
 class WorkerContext {
 public:
@@ -134,22 +178,26 @@ public:
     void export_metrics();
     
 private:
-    /// RPC 请求处理入口
-    void handle_request(void* req_handle, const WorkerRequest* request);
+    /// I/O 线程主循环 (处理 eRPC 事件循环和请求入队)
+    void io_thread_main();
     
-    /// 工作线程主循环
-    void worker_thread_main(size_t thread_id);
+    /// 计算线程主循环 (处理任务队列中的任务)
+    void compute_thread_main(size_t thread_id);
     
-    /// 从队列取任务并处理
+    /// 从任务队列取任务并处理
     void process_tasks();
     
 private:
     WorkerConfig config_;
     
     std::atomic<bool> running_{false};
-    std::vector<std::thread> threads_;
+    std::vector<std::thread> compute_threads_;
+    std::unique_ptr<std::thread> io_thread_;
     
-    // 任务队列 (EDF 或 FCFS)
+    // 线程安全的任务队列 (I/O 线程 → 计算线程)
+    ThreadSafeTaskQueue task_queue_;
+    
+    // 任务调度队列 (已弃用，但保留接口兼容)
     std::unique_ptr<EDFQueue> edf_queue_;
     std::unique_ptr<FCFSQueue> fcfs_queue_;
     

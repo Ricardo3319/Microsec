@@ -22,11 +22,13 @@ Makefile
 *~
 .DS_Store
 
-# Experiment outputs
-results/
-logs/
-*.log
+# Experiment outputs - TRACKED for analysis
+# Exclude CMake compilation logs but keep runtime logs
+/build/**/*.log
 *.out
+# Keep experiment logs and results
+!/logs/
+!/results/
 
 # Core dumps
 core.*
@@ -52,7 +54,8 @@ __pycache__/
 /build/worker
 /build/histogram_merge
 
-# Data files (actual experiment results to exclude)
-# results/ - excluded (large, regenerable)
-# logs/ - excluded (large, regenerable)
-# But keep experiment design and scripts
+# Git tracking
+!logs/*.log
+!results/**/*.hdr
+!results/**/*.csv
+!results/**/*.json

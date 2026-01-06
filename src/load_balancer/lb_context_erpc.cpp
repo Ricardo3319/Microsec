@@ -200,6 +200,11 @@ void LBContext::client_request_handler(erpc::ReqHandle* req_handle, void* contex
     const erpc::MsgBuffer* req_msgbuf = req_handle->get_req_msgbuf();
     auto* request = reinterpret_cast<const RpcClientRequest*>(req_msgbuf->buf_);
     
+    // [DEBUG LOG] 只印前5个避免刷屏
+    if (request->request_id < 5) {
+        printf("[LB] Received Req %lu from Client, dispatching...\n", request->request_id);
+    }
+    
     // 构造内部请求格式
     ClientRequest creq;
     creq.request_id = request->request_id;
@@ -286,6 +291,11 @@ void LBContext::worker_response_callback(void* context, void* tag) {
     
     // 解析 Worker 响应
     auto* wresp = reinterpret_cast<const RpcWorkerResponse*>(worker_resp_buf.buf_);
+    
+    // [DEBUG LOG] 只印前5个避免刷屏
+    if (wresp->request_id < 5) {
+        printf("[LB] Received Resp %lu from Worker %u\n", wresp->request_id, wresp->worker_id);
+    }
     
     // 获取待处理请求信息
     PendingRequest pending;

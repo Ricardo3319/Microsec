@@ -152,6 +152,11 @@ void WorkerContext::request_handler(erpc::ReqHandle* req_handle, void* context) 
     const erpc::MsgBuffer* req_msgbuf = req_handle->get_req_msgbuf();
     auto* request = reinterpret_cast<const RpcWorkerRequest*>(req_msgbuf->buf_);
     
+    // [DEBUG LOG] 只印前5个避免刷屏
+    if (request->request_id < 5) {
+        printf("[Worker %u] Enqueueing Req %lu\n", worker->config_.worker_id, request->request_id);
+    }
+    
     // 构造任务
     Task task;
     task.request_id = request->request_id;
@@ -209,6 +214,11 @@ void WorkerContext::process_tasks() {
         return;
     }
     
+    // [DEBUG LOG] 只印前5个避免刷屏
+    if (task.request_id < 5) {
+        printf("[Worker %u] Processing Req %lu\n", config_.worker_id, task.request_id);
+    }
+    
     Timestamp start = now_ns();
     Timestamp queue_time = start - task.arrival_time;
     
@@ -236,6 +246,11 @@ void WorkerContext::process_tasks() {
     metrics_.record_latency(static_cast<int64_t>(e2e_latency));
     if (!deadline_met) {
         metrics_.record_deadline_miss();
+    }
+    
+    // [DEBUG LOG] 只印前5个避免刷屏
+    if (task.request_id < 5) {
+        printf("[Worker %u] Replying Req %lu\n", config_.worker_id, task.request_id);
     }
     
     // 构造并发送响应 (线程安全：rpc_ 是指针，响应逻辑不会被修改)

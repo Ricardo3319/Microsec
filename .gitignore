@@ -46,12 +46,13 @@ __pycache__/
 *.o
 *.obj
 
-# Executable
-client
-load_balancer
-worker
-histogram_merge
+# Build Executables (not source files)
+/build/client
+/build/load_balancer
+/build/worker
+/build/histogram_merge
 
-# Data files
-*.csv
-*.hdr
+# Data files (actual experiment results to exclude)
+# results/ - excluded (large, regenerable)
+# logs/ - excluded (large, regenerable)
+# But keep experiment design and scripts

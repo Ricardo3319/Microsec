@@ -208,8 +208,11 @@ public:
         if (config_.fixed_deadline_us > 0) {
             req.deadline = req.client_send_time + us_to_ns(config_.fixed_deadline_us);
         } else {
-            req.deadline = req.client_send_time + 
-                           us_to_ns(static_cast<uint64_t>(service_us * config_.deadline_multiplier));
+            // 确保最小 Deadline 不低于 5ms (5000us) 以容忍系统开销和网络 RTT
+            uint64_t derived_deadline = static_cast<uint64_t>(service_us * config_.deadline_multiplier);
+            uint64_t min_deadline_us = 5000;  // 5ms 最小值
+            uint64_t final_deadline_us = std::max(derived_deadline, min_deadline_us);
+            req.deadline = req.client_send_time + us_to_ns(final_deadline_us);
         }
         
         // 生成负载大小 (简化)

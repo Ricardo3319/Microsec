@@ -54,7 +54,9 @@ int main(int argc, char* argv[]) {
     config.workload.distribution = WorkloadDistribution::kPareto;
     config.workload.pareto_alpha = 1.2;
     config.workload.service_time_min_us = 10;
-    config.workload.deadline_multiplier = 5.0;  // deadline = service_time * multiplier (原始值)
+    // 在无 Modded Driver 环境下，RTT 可能达到 500us-1ms，且存在长尾。
+    // 将倍数调整为 100 以适应 CloudLab 环境物理现实，避免所有算法都失败
+    config.workload.deadline_multiplier = 100.0;
     
     static struct option long_options[] = {
         {"id",          required_argument, 0, 'i'},

@@ -194,9 +194,8 @@ void ClientContext::run() {
             rpc_req->request_id = creq.request_id;
             rpc_req->client_send_time = creq.client_send_time;
             rpc_req->deadline = creq.deadline;
-            rpc_req->service_time_hint = static_cast<uint32_t>(
-                ns_to_us(creq.deadline - creq.client_send_time) / 5
-            );
+            // [FIX] 使用生成器生成的原始服务时间，不基于 deadline 计算
+            rpc_req->service_time_hint = creq.expected_service_us;
             rpc_req->client_id = config_.client_id;
             rpc_req->request_type = static_cast<uint8_t>(creq.type);
             rpc_req->payload_size = creq.payload_size;
@@ -380,9 +379,8 @@ void ClientContext::sender_thread_main(size_t thread_id) {
         rpc_req->request_id = creq.request_id;
         rpc_req->client_send_time = creq.client_send_time;
         rpc_req->deadline = creq.deadline;
-        rpc_req->service_time_hint = static_cast<uint32_t>(
-            ns_to_us(creq.deadline - creq.client_send_time) / 5  // hint = deadline/5
-        );
+        // [FIX] 使用生成器生成的原始服务时间，不基于 deadline 计算
+        rpc_req->service_time_hint = creq.expected_service_us;
         rpc_req->client_id = config_.client_id;
         rpc_req->request_type = static_cast<uint8_t>(creq.type);
         rpc_req->payload_size = creq.payload_size;

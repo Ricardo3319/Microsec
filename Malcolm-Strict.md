@@ -798,36 +798,6 @@ Deadline Miss Rate:
 * **对比曲线**: 同上。  
 * **预期形态**:  
   * 当 $\\alpha \> 2$ (轻尾) 时，Malcolm 和 Malcolm-Strict 性能接近。  
-  * 当 $\\alpha \< 1.5$ (重尾) 时，Malcolm 的违约率激增，而 Malcolm-Strict 能够保持低违约率。  
-* **核心论点**: 验证“方差最小化”在重尾分布下失效，而 CVaR 优化依然有效。
-
-### **实验 3: 信息陈旧性敏感度 (Staleness Sensitivity)**
-
-* **X轴**: 心跳间隔 (Heartbeat Interval)，从 $10 \\mu s$ 到 $1000 \\mu s$。  
-* **Y轴**: 有效吞吐量 (Goodput)。  
-* **预期结果**:  
-  * 传统 JSQ 策略随延迟增加性能急剧下降（Herd Effect）。  
-  * Malcolm-Strict 由于 IQN 学习了状态转移的**不确定性分布**（Aleatoric Uncertainty），在信息陈旧时表现出更强的鲁棒性，下降曲线较平缓。
-
-### **5.5 实验 4: 障碍奖励函数消融研究 (Ablation Study: Barrier Reward)**
-
-* **目的**: 证明为什么需要指数级障碍函数，而不是线性惩罚。  
-* **设置**:  
-  * Config A: Malcolm-Strict (Full)  
-  * Config B: 使用线性奖励 $R \= \-Latency$。  
-  * Config C: 使用阶跃奖励 (Step Function) $R \= \-100 \\text{ if Miss else } 1$。  
-* **预期结果**:  
-  * Config B 会导致 Agent 忽视 Deadline 附近的微小差异，导致大量刚好超时（Just-miss）的任务。  
-  * Config C 导致训练不稳定（稀疏奖励）。  
-  * Config A (Barrier) 能够将延迟分布“推”离 Deadline 边界，形成安全裕度（Safety Margin）。
-
-## ---
-
-**5.6 本章总结**
-
-通过 SimPy 和 OMNeT++ 的联合验证，我们不仅能在算法层面证明 Malcolm-Strict 的收敛性，还能在系统层面评估其在真实网络约束下的可行性。这种**从数学原理到物理实现**的闭环验证策略，是顶级系统会议（如 SIGCOMM/OSDI）所极度看重的。接下来的工作是编写代码并启动大规模并行仿真。
-
-# **第6章：基准算法实现与对比实验设计 (Baselines Implementation & Comparative Design)**
 
 为了在学术上严格验证 **Malcolm-Strict** 的贡献，我们必须构建一个统一的评测平台（Unified Evaluation Platform），在该平台下公平地对比不同调度策略。本章重点阐述如何在高保真仿真环境中复现 **原版 Malcolm (SIGMETRICS '22)** 的核心机制，以及经典算法（JSQ, Power-of-d）在微秒级约束下的具体实现。
 

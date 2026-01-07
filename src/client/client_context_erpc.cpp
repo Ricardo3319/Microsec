@@ -115,6 +115,8 @@ void ClientContext::run() {
         req_bufs_[i] = rpc_->alloc_msg_buffer_or_die(sizeof(RpcClientRequest));
         resp_bufs_[i] = rpc_->alloc_msg_buffer_or_die(sizeof(RpcClientResponse));
     }
+    // [NEW] 初始化本地 deadline 数组
+    req_deadlines_.resize(buf_pool_size, 0);
     
     start_time_ = now_ns();
     end_time_ = start_time_ + ms_to_ns(
@@ -199,19 +201,22 @@ void ClientContext::run() {
             rpc_req->request_type = static_cast<uint8_t>(creq.type);
             rpc_req->payload_size = creq.payload_size;
             
+            // 记录本 slot 的 Deadline (Client 时钟域)
+            req_deadlines_[idx] = creq.deadline;
+
             // 增加在途请求计数
             inflight_requests_.fetch_add(1, std::memory_order_relaxed);
-            
-            // 发送请求
+
+            // 发送请求，tag 传递 idx
             rpc_->enqueue_request(
                 lb_session_,
                 kReqClientToLB,
                 &req_buf,
                 &resp_buf,
                 response_callback,
-                &resp_buf
+                reinterpret_cast<void*>(idx)
             );
-            
+
             sent_requests_.fetch_add(1, std::memory_order_relaxed);
             
             // 更新下次发送时间
@@ -312,9 +317,12 @@ void ClientContext::response_callback(void* context, void* tag) {
     
     Timestamp recv_time = now_ns();
     
-    auto* resp_buf = static_cast<erpc::MsgBuffer*>(tag);
-    auto* response = reinterpret_cast<const RpcClientResponse*>(resp_buf->buf_);
-    
+    // 从 tag 恢复 index (发送时传入)
+    size_t idx = reinterpret_cast<size_t>(tag);
+    if (idx >= client->resp_bufs_.size()) return; // 防御性检查
+
+    auto* response = reinterpret_cast<const RpcClientResponse*>(client->resp_bufs_[idx].buf_);
+
     // 计算端到端延迟
     Timestamp e2e_latency = recv_time - response->client_send_time;
     
@@ -322,7 +330,10 @@ void ClientContext::response_callback(void* context, void* tag) {
     if (!client->in_warmup_.load()) {
         client->metrics_.record_latency(static_cast<int64_t>(e2e_latency));
         
-        if (!response->deadline_met) {
+        // 使用本地记录的 deadline 进行判定 (客户端时钟域)
+        Timestamp original_deadline = client->req_deadlines_[idx];
+        bool actual_deadline_met = (recv_time <= original_deadline);
+        if (!actual_deadline_met) {
             client->metrics_.record_deadline_miss();
         }
     }
@@ -376,16 +387,19 @@ void ClientContext::sender_thread_main(size_t thread_id) {
         rpc_req->request_type = static_cast<uint8_t>(creq.type);
         rpc_req->payload_size = creq.payload_size;
         
-        // 发送请求
+        // 记录本 slot 的 Deadline (Client 时钟域)
+        req_deadlines_[idx] = creq.deadline;
+
+        // 发送请求 (tag = idx)
         rpc_->enqueue_request(
             lb_session_,
             kReqClientToLB,
             &req_buf,
             &resp_buf,
             response_callback,
-            &resp_buf  // tag = resp_buf 指针
+            reinterpret_cast<void*>(idx)
         );
-        
+
         sent_requests_.fetch_add(1, std::memory_order_relaxed);
         
         // 更新下次发送时间

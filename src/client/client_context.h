@@ -118,6 +118,9 @@ private:
     std::vector<erpc::MsgBuffer> req_bufs_;
     std::vector<erpc::MsgBuffer> resp_bufs_;
     std::atomic<size_t> buf_idx_{0};
+
+    // [NEW] 本地存储每個 slot 對應請求的 Deadline (纳秒)
+    std::vector<Timestamp> req_deadlines_;
     
     // 并发控制 - 限制同时在途请求数
     std::atomic<size_t> inflight_requests_{0};
